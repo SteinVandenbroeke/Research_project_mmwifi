@@ -1,2 +1,4 @@
 .idea
-/5Ghz/unprocessed_data/
+/5Ghz/unprocessed_data/*
+60Ghz/__pycache__/
+5Ghz/output

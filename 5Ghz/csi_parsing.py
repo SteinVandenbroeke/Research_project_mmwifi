@@ -1,7 +1,12 @@
+import concurrent.futures
+
 import csv
 import os
 import re
-from datetime import datetime
+import subprocess
+from datetime import datetime, timezone, timedelta
+from functools import partial
+from warnings import catch_warnings
 
 from CSIKit.reader import get_reader
 from CSIKit.util import csitools
@@ -45,14 +50,13 @@ def get_csi_data(pcap_file):
     except (struct.error, ValueError) as e:
         print(f"Error reading file: {e}")
         try:
-            print("Removing last packet and retrying...")
-            new_filename = pcap_file.replace(".pcap", "_new.pcap")  # Save the modified pcap as a new file
-            remove_last_packet(pcap_file, new_filename)
+            new_filename = pcap_file.replace(".pcap", "_new.pcap")# Save the modified pcap as a new file
+            if not os.path.exists(new_filename):
+                print("Removing last packet and retrying...")
+                remove_last_packet(pcap_file, new_filename)
             csi_data = reader.read_file(new_filename, scaled=True)  # 'scaled=True' converts values to dB
         except Exception as e:
             print(f"Error reading file: {e}")
-            print("If the error concerns an (integer) overflow error and you are running this on a Windows machine, "
-                  "try running the script on a Unix-based OS.")
             return None
     return csi_data
 
@@ -95,51 +99,62 @@ def extract_times(filename) -> (datetime, datetime):
         sys_time = datetime.strptime(sys_time_str[:22], "%Y%m%d_%H%M%S.%f")
         ssh_time = datetime.strptime(ssh_time_str[:22], "%Y%m%d_%H%M%S.%f")
 
+        print(sys_time, ssh_time)
+
         return sys_time, ssh_time
     else:
         return None, None
 
-def csi_data_to_csv(datafolder, timings_csv):
-    csi_i = 0
+def csi_data_to_csv(datafolder, timings_csv, run_for_person_name = None):
     print("start evalutating data")
     data = []
-    with open(data_folder + timings_csv, mode='r') as file:
-        csvreader = csv.reader(file)
+    with open(timings_csv, mode='r') as file:
+        csvreader = list(csv.reader(file))
+        file.close()
         mesurement = 0
         saved_files = {}
         person = None
         for row in csvreader:
             person_name = row[0].lower()
+            print(person_name)
             if person != person_name:
                 person = person_name
                 saved_files = {}
+
+            if person_name != run_for_person_name and run_for_person_name is not None:
+                continue
+
             start_time = datetime.fromtimestamp(float(row[1]))
             end_time = datetime.fromtimestamp(float(row[2]))
             for filename in sorted(os.listdir(f"./{datafolder}/{person_name}/")):
                 print(filename)
                 pcap_file = os.path.join(f"./{datafolder}/{person_name}/", filename)
                 system_time, ssh_time = extract_times(filename)
-                delta_time = system_time - ssh_time
-                print(delta_time.days)
 
                 if ".csv" in filename:
                     continue
 
                 if pcap_file not in saved_files.keys():
                     csi_data = get_csi_data(pcap_file)
+                    csi_i = 0
                     csi_matrix, no_frames, no_subcarriers = csitools.get_CSI(csi_data, metric="amplitude")
-                    saved_files[pcap_file] = csi_matrix, no_frames, no_subcarriers
+                    saved_files[pcap_file] = csi_matrix, no_frames, no_subcarriers, csi_data
                 else:
-                    csi_matrix, no_frames, no_subcarriers = saved_files[pcap_file]
+                    csi_i = 0
+                    csi_matrix, no_frames, no_subcarriers, csi_data = saved_files[pcap_file]
 
                 if csi_matrix.shape[2] == 1 and csi_matrix.shape[3] == 1:
                     csi_matrix = np.squeeze(csi_matrix)  # -> (num_frames, num_subcarriers)
+
+                time_zone_diff = divmod((datetime.fromtimestamp(csi_data.timestamps[0]) - ssh_time).seconds, 3600)[0]
+                delta_time = system_time - ssh_time - timedelta(hours=time_zone_diff)  # ajust for time zone difference
+                print("delta time", delta_time)
 
                 while csi_i < len(csi_data.timestamps) and start_time > datetime.fromtimestamp(csi_data.timestamps[csi_i]) + delta_time:
                     csi_i += 1
 
                 while csi_i < len(csi_data.timestamps) and start_time < datetime.fromtimestamp(csi_data.timestamps[csi_i]) + delta_time < end_time:
-                    print(row[0], row[3], start_time.isoformat(), end_time.isoformat(), (datetime.fromtimestamp(csi_data.timestamps[csi_i]) + delta_time).isoformat(), "save")
+                    print(row[0], row[3], start_time.isoformat(), end_time.isoformat(), (datetime.fromtimestamp(csi_data.timestamps[csi_i])).isoformat(), "save")
                     data.append([mesurement, row[0], row[3], start_time.isoformat(), end_time.isoformat(), (datetime.fromtimestamp(csi_data.timestamps[csi_i]) + delta_time).isoformat(), no_subcarriers, csi_matrix[csi_i].tolist()])
                     csi_i += 1
                 mesurement += 1
@@ -148,6 +163,7 @@ def csi_data_to_csv(datafolder, timings_csv):
     with open('output/output_5Ghz.csv', 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerows(data)
+    return data
 
 
 def plot_csi_amplitudes(csi_amplitudes):
@@ -242,15 +258,53 @@ def plot_amp():
 
     BatchGraph.plot_heatmap(csi_matrix_squeezed, csi_data.timestamps)
 
+def csi_data_to_csv_mulithreaded(datafolder, timings_csv):
+    person_names = []
+    with open(timings_csv, mode='r') as file:
+        csvreader = csv.reader(file)
+        mesurement = 0
+        saved_files = {}
+        person = None
+        for row in csvreader:
+            person_name = row[0].lower()
+            if person_name not in person_names:
+                person_names.append(person_name)
+
+        results = [None] * len(person_names)  # Placeholder for results in order
+
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            # Submit all tasks and store futures
+            future_to_index = {executor.submit(csi_data_to_csv, datafolder, timings_csv, person): idx
+                               for idx, person in enumerate(person_names)}
+
+            # Collect results in order
+            for future in concurrent.futures.as_completed(future_to_index):
+                print(f"DONE: {person_names[future]}")
+                index = future_to_index[future]
+                results[index] = future.result()
+
+        concatineted_results = []
+        for result in results:
+            concatineted_results += result
+
+        with open('output/output_5Ghz.csv', 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerows(concatineted_results)
+
+        return results
+
+
 #plot_csi_amplitudes(csi_amplitudes)
 # plot_amp()
 
 # data_folder = "./csi_collection/packet_data/"
 
-data_folder = "packet_data/"
-output_folder = "output/"
-timings_file = "timing.csv"
+data_folder = "unprocessed_data/locations"
+timings_file = "../possition_timings.csv"
 
 #csi_data = get_csi_data(filename)
 csi_data_to_csv(data_folder, timings_file)
+
+subprocess.run(["systemctl", "suspend"])
+
 #print("CSI Amplitudes example:", csi_amplitudes)

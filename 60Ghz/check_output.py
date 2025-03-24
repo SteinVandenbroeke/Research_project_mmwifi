@@ -1,7 +1,7 @@
 import csv
 import math
 
-with open("output/output_5Ghz_12_03.csv", mode='r') as file:
+with open("output/output_60Ghz_combined_cleaned.csv", mode='r') as file:
     data_counter = {}
     csvreader = csv.reader(file)
     for row in csvreader:
@@ -20,7 +20,7 @@ with open("output/output_5Ghz_12_03.csv", mode='r') as file:
         print(name)
         print(len(data.keys()), data)
         for position, item in data.items():
-            if item < 200:
+            if item < 100:
                 print(f"Not enghough data for position {position}")
             if item < least_measurements:
                 least_measurements = item
