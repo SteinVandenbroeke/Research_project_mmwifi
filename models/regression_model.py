@@ -9,17 +9,18 @@ from torch import nn
 from torch.utils.data import DataLoader, Subset
 
 from models import helperfunction
-from models.networks.network import NeuralNet
 from IPython.display import Image
 from tqdm import tqdm
 from torchviz import make_dot
 
+from models.networks.regression_network import Regression_neural_network
+
 GRID_SIZE_H = 4
 GRID_SIZE_V = 5
 
-class TestModel():
+class RegressionTestModel():
     def __init__(self, name, dataset, dataset_split=[0.8, 0.1, 0.1], batch_size=50, num_epochs=500, learning_rate=0.00001,
-                    Network=NeuralNet, hidden_size=500, random_split=True):
+                    Network=Regression_neural_network, hidden_size=500, random_split=True):
         self.name = f"dataset_{dataset.measurements_per_sample}__{name}_{batch_size}_{num_epochs}_{learning_rate}_{hidden_size}_{random_split}"
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.dataset = dataset
@@ -37,10 +38,10 @@ class TestModel():
 
         if not os.path.isdir(f"outputs/{self.name}"):
             os.makedirs(f"outputs/{self.name}")
-
+        self.dataset.num_classes = 2
         self.already_trained = False
         if os.path.isfile(f"outputs/{self.name}/model.pt"):
-            self.model = NeuralNet(self.input_size, self.hidden_size, self.dataset.number_of_classes(), self.device)
+            self.model = Network(self.input_size, self.hidden_size, self.dataset.number_of_classes(), self.device)
             self.model.load_state_dict(torch.load(f"outputs/{self.name}/model.pt", weights_only=True))
             self.already_trained = True
         else:
@@ -99,7 +100,7 @@ class TestModel():
         n_iterations = math.ceil(total_samples / 4)
         print(total_samples, n_iterations)
 
-        criterion = nn.CrossEntropyLoss(size_average=False).cuda()
+        criterion = nn.MSELoss().cuda()
         print(self.dataset.number_of_classes())
 
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
@@ -128,18 +129,22 @@ class TestModel():
                 # inputs = inputs + noice_matrix
 
                 # print("inputs size", inputs.shape)
-                labels = labels.to(self.device)
+                target_coords = torch.stack([self.label_to_coord(lbl) for lbl in labels]).to(self.device)
                 # Forward passimport copy
                 outputs = self.model(inputs)
                 # print("output size", outputs.shape)
 
                 # print("labels size", labels.shape)
-                loss = criterion(outputs, labels)
+                loss = criterion(outputs, target_coords)
                 total_loss += loss.item()
 
                 _, predicted = torch.max(outputs.data, 1)
+
+                correct_compare = target_coords.eq(torch.round(outputs))
+                count = torch.sum(torch.all(correct_compare == True, dim=1))
+
                 n_samples += labels.size(0)
-                n_correct += (predicted == labels).sum().item()
+                n_correct += count.item()
 
                 # Backward and optimize
                 optimizer.zero_grad()
@@ -148,6 +153,9 @@ class TestModel():
 
             train_loss = total_loss / len(train_loader)
             train_acc = n_correct / n_samples
+
+            if train_acc > best_epoch[0]:
+                best_epoch = (train_acc, self.model)
 
             train_losses.append(train_loss)
             scheduler.step(total_loss)
@@ -160,49 +168,52 @@ class TestModel():
             with torch.no_grad():
                 n_correct = 0
                 n_samples = 0
-                for images, labels in validation_loader:
-                    for label in labels:
-                        if label.item() not in counter.keys():
-                            counter[label.item()] = (0, 0)
-                        counter[label.item()] = (counter[label.item()][0], counter[label.item()][1] + 1)
-
-                    images = images.reshape(-1, self.input_size).to(self.device)
+                for inputs, labels in validation_loader:
+                    inputs = inputs.reshape(-1, self.input_size).to(self.device)
                     labels = labels.to(self.device)
-                    outputs = self.model(images)
-                    loss = criterion(outputs, labels)
+
+                    target_coords = torch.stack([self.label_to_coord(lbl) for lbl in labels]).to(self.device)
+                    outputs = self.model(inputs)
+                    loss = criterion(outputs, target_coords)
                     val_loss += loss.item()
                     # max returns (value ,index)
-                    _, predicted = torch.max(outputs.data, 1)
+                    # print("labels", target_coords.shape)
+                    # print("outputs", torch.round(outputs).shape)
+                    # print("compare", target_coords.eq(torch.round(outputs)))
+                    correct_compare = target_coords.eq(torch.round(outputs))
+                    count = torch.sum(torch.all(correct_compare == True, dim=1))
+                    # print(count.item())
+                    #
+                    # _, predicted = torch.max(outputs.data, 1)
                     n_samples += labels.size(0)
-                    n_correct += (predicted == labels).sum().item()
+                    #
+                    n_correct += count.item()
 
                 validation_losses.append(val_loss)
                 validation_accuracies.append(n_correct / n_samples)
 
                 acc = 100.0 * n_correct / n_samples
 
-                if acc > best_epoch[0]:
-                    best_epoch = (train_acc, self.model)
-
                 # print(f'Epoch: {epoch + 1}/{self.num_epochs}, Labels {labels.shape}')
                 # print(f'Validation acc: {acc:2f} | Train acc:{(train_acc * 100):2f} %')
 
-        plt.figure(figsize=(12, 5))
-        plt.subplot(1, 2, 1)
-        plt.plot(range(1, len(train_losses) + 1), train_losses, label='Train Loss')
-        plt.plot(range(1, len(validation_losses) + 1), validation_losses, label='Validation Loss')
-        plt.xlabel('Epochs')
-        plt.ylabel('Loss')
-        plt.legend()
-        plt.title('Loss Over Epochs')
+            plt.figure(figsize=(12, 5))
+            plt.subplot(1, 2, 1)
+            plt.plot(range(1, len(train_losses) + 1), train_losses, label='Train Loss')
+            plt.plot(range(1, len(validation_losses) + 1), validation_losses, label='Validation Loss')
+            plt.xlabel('Epochs')
+            plt.ylabel('Loss')
+            plt.legend()
+            plt.title('Loss Over Epochs')
 
-        plt.subplot(1, 2, 2)
-        plt.plot(range(1, len(train_accuracies) + 1), train_accuracies, label='Train Accuracy')
-        plt.plot(range(1, len(validation_accuracies) + 1), validation_accuracies, label='Validation Accuracy')
-        plt.xlabel('Epochs')
-        plt.ylabel('Accuracy')
-        plt.legend()
-        plt.title('Accuracy Over Epochs')
+            plt.subplot(1, 2, 2)
+            plt.plot(range(1, len(train_accuracies) + 1), train_accuracies, label='Train Accuracy')
+            plt.plot(range(1, len(validation_accuracies) + 1), validation_accuracies, label='Validation Accuracy')
+            plt.xlabel('Epochs')
+            plt.ylabel('Accuracy')
+            plt.legend()
+            plt.title('Accuracy Over Epochs')
+            plt.show()
 
         print(counter)
 
@@ -214,6 +225,17 @@ class TestModel():
 
     def location_to_x_y(self, location):
         return location % (GRID_SIZE_H + 1), math.floor(location / GRID_SIZE_V)
+
+    def coord_to_label(self, coord):
+        x = coord[0][0].item()
+        y = coord[0][1].item()
+        assert x <= GRID_SIZE_V and y <= GRID_SIZE_H, f"error {x}-{y}"
+        label = x + (y * GRID_SIZE_V)
+        assert label <= 20
+        return label
+
+    def label_to_coord(self, label):
+        return torch.tensor(list(self.location_to_x_y(label)), dtype=torch.float32)
 
     def test(self, retest=False):
         if not retest and self.test_results is not None:
@@ -241,19 +263,20 @@ class TestModel():
         location_plot = [([], []) for _ in range(20)]
         accuracy_per_possition = [0] * 20
         with torch.no_grad():
-            for images, labels in test_loader:
-                images = images.reshape(-1, self.input_size).to(device)
+            for inputs, labels in test_loader:
+                inputs = inputs.reshape(-1, self.input_size).to(self.device)
                 labels = labels.to(device)
-                outputs = self.model(images)
+                outputs = self.model(inputs)
+                target_coords = torch.stack([self.label_to_coord(lbl) for lbl in labels]).to(device)
                 # max returns (value ,index)
-                _, predicted = torch.max(outputs.data, 1)
+                average_distance_error += torch.pairwise_distance(target_coords * 0.5, outputs * 0.5).item()
+                total_samples += 1;
+                predicted = int(self.coord_to_label(torch.abs(torch.round(outputs))))
                 actual_list.append(labels.item())
-                predicted_list.append(predicted.item())
-                location_plot[labels.item()][0].append(labels.item())
-                location_plot[labels.item()][1].append(predicted.item())
-                correct_samples += labels.item() == predicted.item()
-                average_distance_error += torch.pairwise_distance(helperfunction.label_to_coord(labels.item()) * 0.8, helperfunction.label_to_coord(predicted.item()) * 0.8).item()
-
+                correct_samples += labels.item() == predicted
+                predicted_list.append(predicted)
+                location_plot[labels.item()][0].append(outputs[0][0].item())
+                location_plot[labels.item()][1].append(outputs[0][1].item())
                 total_samples += 1
 
         print("avarge distance error: ", (average_distance_error / total_samples))
@@ -270,34 +293,38 @@ class TestModel():
         fig, ax = plt.subplots(figsize=(10, 8))  # Adjust the figure size
 
         # Plot confusion matrix with larger cells
-
         cm_display = metrics.ConfusionMatrixDisplay(confusion_matrix=confusion_matrix,
-                                                    display_labels=[i for i in range(self.dataset.number_of_classes())])
+                                                    display_labels=[i for i in range(20)])
         cm_display.plot(ax=ax, cmap="Blues", values_format=".2f")  # Ensure values show correctly formatted
+
+        plt.xticks(fontsize=12)  # Adjust tick font size
+        plt.yticks(fontsize=12)
+        plt.show()
 
         plt.xticks(fontsize=12)  # Adjust tick font size
         plt.yticks(fontsize=12)
         plt.savefig(f"outputs/{self.name}/confusion_matrix.png")
         #Image(filename=f"outputs/{self.name}/confusion_matrix.png")
-
-        colors = plt.cm.tab20.colors[:20]
-        fig, ax = plt.subplots(figsize=(14, 8))
-        placed = {}
-        correct_per_possition = [0] * 20
-        for i, locations in enumerate(location_plot):
-            x_cor, y_cor = self.location_to_x_y(i)
-            plt.scatter(x_cor, y_cor, color=colors[i], label=f'Location {i}')
-            for location_cor, location_pred in zip(locations[0], locations[1]):
-                if i != location_cor:
-                    assert "error"
-                x_pred, y_pred = self.location_to_x_y(location_cor)
-                x_cor, y_cor = self.location_to_x_y(location_pred)
-                if x_cor != x_pred or y_cor != y_pred:
-                    plt.arrow(x_pred, y_pred, x_cor - x_pred, y_cor - y_pred, color=colors[location_pred],
-                              head_width=0.1, head_length=0.1, alpha=0.1)
-                else:
-                    correct_per_possition[i] += 1
-            accuracy_per_possition[i] = correct_per_possition[i] / len(locations[0])
+        print("locationplot", location_plot)
+        # colors = plt.cm.tab20.colors[:20]
+        # fig, ax = plt.subplots(figsize=(14, 8))
+        # placed = {}
+        # correct_per_possition = [0] * 20
+        # for i, locations in enumerate(location_plot):
+        #     x_cor, y_cor = self.location_to_x_y(i)
+        #     plt.scatter(x_cor, y_cor, color=colors[i], label=f'Location {i}')
+        #     for location_cor, location_pred in zip(locations[0], locations[1]):
+        #         if i != location_cor:
+        #             assert "error"
+        #         x_pred, y_pred = self.location_to_x_y(location_cor)
+        #         x_cor, y_cor = self.location_to_x_y(location_pred)
+        #         if x_cor != x_pred or y_cor != y_pred:
+        #             print(location_pred)
+        #             plt.arrow(x_pred, y_pred, x_cor - x_pred, y_cor - y_pred, color=colors[location_pred],
+        #                       head_width=0.1, head_length=0.1, alpha=0.1)
+        #         else:
+        #             correct_per_possition[i] += 1
+        #     accuracy_per_possition[i] = correct_per_possition[i] / len(locations[0])
 
         location = 0
         for y in range(4):
@@ -316,6 +343,28 @@ class TestModel():
         plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
         plt.savefig(f"outputs/{self.name}/testing_locations.png")
         #Image(filename=f"outputs/{self.name}/testing_locations.png")
+
+        colors = plt.cm.tab20.colors[:20]
+        fig, ax = plt.subplots(figsize=(14, 8))
+        print("locationplot", location_plot)
+        for i, location in enumerate(location_plot):
+            plt.scatter(location[0], location[1], color=colors[i], label=f'Location {i}')
+
+        location = 0
+        for y in range(4):
+            for x in range(5):
+                plt.text(x, y, str(location), fontsize=12, horizontalalignment='center', verticalalignment='center')
+                location += 1
+
+        plt.xlabel('x location')
+        plt.ylabel('y location')
+        plt.title('Position plot on locations')
+
+        box = ax.get_position()
+        ax.set_position([box.x0, box.y0, box.width * 0.8, box.height])
+
+        plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+        plt.savefig(f"outputs/{self.name}/location_offsets.png")
 
     def model_to_onnx(self):
         dummy_input = torch.randn(1, self.input_size).to(self.device)

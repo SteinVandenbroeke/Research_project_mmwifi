@@ -1,14 +1,14 @@
+import torch
 import torch.nn as nn
 
-# Fully connected neural network with one hidden layer
-class NeuralNet(nn.Module):
+class Regression_neural_network(nn.Module):
     def __init__(self, input_size, hidden_size, num_classes, device):
-        super(NeuralNet, self).__init__()
+        super(Regression_neural_network, self).__init__()
         self.input_size = input_size
         self.l1 = nn.Linear(input_size, hidden_size)
         # self.dropout1 = nn.Dropout(0.3)
         # self.relu1 = nn.ReLU()
-       # self.l2 = nn.Linear(hidden_size + 100, hidden_size)
+        # self.l2 = nn.Linear(hidden_size + 100, hidden_size)
         self.dropout2 = nn.Dropout(0.2)
         self.relu2 = nn.ReLU()
         self.l3 = nn.Linear(hidden_size, hidden_size - 100)
@@ -16,8 +16,10 @@ class NeuralNet(nn.Module):
         self.relu3 = nn.ReLU()
         self.l4 = nn.Linear(hidden_size - 100, num_classes)
         self.cuda(device=device)
+        self.device = device
 
     def forward(self, x):
+        x = x.reshape(-1, self.input_size)
         out = self.l1(x)
         # out = self.dropout1(out)
         # out = self.relu1(out)
@@ -27,6 +29,6 @@ class NeuralNet(nn.Module):
         out = self.l3(out)
         out = self.dropout3(out)
         out = self.relu3(out)
-        out = self.l4(out)
+        out = torch.sigmoid(self.l4(out))
         # no activation and no softmax at the end
-        return out
+        return out * torch.tensor([4,3]).to(device=self.device)  #scale to gridsize
